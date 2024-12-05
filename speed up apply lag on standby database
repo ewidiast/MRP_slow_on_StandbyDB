@@ -1,0 +1,84 @@
+
+Case : Apply rate found very slow at standby site
+The size of redo is 8GB each
+
+Below is the log gap between primary and standby:
+
+DB_NAME  HOSTNAME     LOG_ARCHIVED LOG_APPLIED APPLIED_TIME LOG_GAP
+-------- ------------ ------------ ----------- ------------ -------
+WARE	   DWH-DC	     88643	 	    88337 	   16-OCT/05:49		306
+
+DEST_NAME	           STATUS    ERROR
+-------------------- --------- ------------------------------------------------------------
+LOG_ARCHIVE_DEST_2   VALID
+
+above redo was applied using  the common MRP syntax :
+sql> alter database recover managed standby database disconnect nodelay;
+
+2024-10-17T15:54:25.105142+07:00
+Managed Standby Recovery starting Real Time Apply
+2024-10-17T15:54:26.484797+07:00
+Parallel Media Recovery started with 64 slaves
+
+Now i'm trying to reduce parallelism, hope it will speed up recovery time
+
+sql> alter database recover managed standby database disconnect parallel 36 nodelay;
+
+INST_ID  NAME            VALUE
+--------------------------------
+1        Apply_lag      +01 07:21:46
+2        Transport_lag  +00 00:00:00
+
+sql> alter database recover managed standby database disconnect parallel 24 nodelay;
+
+INST_ID  NAME            VALUE
+--------------------------------
+1        Apply_lag      +01 08:10:12
+2        Transport_lag  +00 00:00:00
+
+The average apply rate is 5220 KB/sec
+
+START_TIME	        TYPE	          ITEM		                  UNITS	      SOFAR	     TOTAL     TIMESTAMP
+------------------- --------------- ------------------------- ---------- ---------- ---------- -------------------
+17-10-2024 19:00:59 Media Recovery  Average Apply Rate	      KB/sec	      5220	     0
+
+==>> Reducing parallel recovery doesn't help much as the gap increases
+
+Now i'm trying to trace the MRP process :
+
+#1 find the MRP pid on standby db
+sql> select process,pid from V$managed_standby where process like '%MRP%';
+#2 turn on the oratracing 
+SQL> oradebug setospid <MRPPID>
+SQL> oradebug unlimit
+SQL> oradebug Event 10046 trace name context forever, level 12
+
+#3 Wait about 10mins
+
+4) To turn off the tracing:
+SQL> oradebug setospid <MRPPID>
+SQL> oradebug Event 10046 trace name context off
+SQL> oradebug tracefile_name
+/u01/app/oracle/diag/rdbms/xxdrc/xxx/trace/xxx_mrp0_63842.trc
+
+here is the trace file, i found MRP slow was due to high parallelism :
+
+*** 2024-10-17T17:42:20.206926+07:00
+WAIT #0: nam='class slave wait' ela= 999983 slave id=0 p2=0 p3=0 obj#=-1 tim=265227863016
+WAIT #0: nam='parallel recovery coordinator idle wait' ela= 100023 p1=0 p2=0 p3=0 obj#=-1 tim=265227963103
+
+*** 2024-10-17T17:42:21.307032+07:00
+WAIT #0: nam='class slave wait' ela= 999943 slave id=0 p2=0 p3=0 obj#=-1 tim=265228963087
+WAIT #0: nam='parallel recovery coordinator idle wait' ela= 99847 p1=0 p2=0 p3=0 obj#=-1 tim=265229063081
+
+now lets start the MRP using serial recovery :
+sql> Alter database recover managed standby database disconnect from session noparallel;
+
+Now The average apply rate increase to 43020 KB/sec
+
+START_TIME	        TYPE	          ITEM		                  UNITS	      SOFAR	     TOTAL     TIMESTAMP
+------------------- --------------- ------------------------- ---------- ---------- ---------- -------------------
+17-10-2024 19:00:59 Media Recovery  Average Apply Rate	      KB/sec	      43020	     0
+
+
+
